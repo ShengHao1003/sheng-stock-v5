@@ -1,28 +1,20 @@
 services:
   - type: web
-    name: sheng-stock-line-bot
+    name: sheng-stock-v6
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 180
     envVars:
       - key: TZ
         value: Asia/Taipei
-      - key: LINE_CHANNEL_ACCESS_TOKEN
-        sync: false
-      - key: LINE_CHANNEL_SECRET
-        sync: false
-      - key: LINE_TO_ID
-        sync: false
-      - key: AUTO_PUSH_ENABLED
+      - key: ENABLE_SCHEDULER
         value: "1"
-      - key: AUTO_PUSH_HOUR
-        value: "18"
-      - key: AUTO_PUSH_MINUTE
+      - key: AUTO_PUSH_ENABLED
         value: "0"
       - key: DEFAULT_PRICE_MIN
-        value: "100"
+        value: "10"
       - key: DEFAULT_PRICE_MAX
         value: "300"
       - key: DEFAULT_ANALYSIS_MODE
-        value: "5"
+        value: "1"

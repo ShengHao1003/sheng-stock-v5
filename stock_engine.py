@@ -1,66 +1,58 @@
 from __future__ import annotations
 import datetime as dt
 import os
-from dataclasses import dataclass
-import requests
+from typing import Any
+import numpy as np
 import pandas as pd
+import requests
 
-TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
-TWSE_MI_INDEX = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
 
-THEMES = {
-    "AI伺服器": ["3231", "2382", "6669", "2356", "2376", "3017"],
-    "航運航空": ["2603", "2609", "2615", "2610", "2618"],
-    "重電/電力": ["1513", "1519", "1503", "1605", "1611"],
-    "PCB/載板": ["4958", "3037", "8046", "3189", "2313"],
-    "半導體": ["2330", "2303", "3034", "2449", "2408"],
-    "金融": ["2880", "2881", "2882", "2883", "2884", "2885", "2886", "2887", "2890", "2891", "2892"],
-    "塑化": ["1301", "1303", "1326", "6505"],
-    "散熱": ["3017", "3324", "6230", "2421"],
+THEMES: dict[str, list[str]] = {
+    "AI伺服器": ["2382", "3231", "6669", "2356", "2357", "2317", "2376"],
+    "PCB/ABF": ["3037", "3189", "4958", "8046", "2368", "6274", "6153"],
+    "玻璃基板": ["2409", "3481", "6182", "8046", "4958", "3017"],
+    "機器人": ["2049", "3019", "2464", "1590", "2359", "2371"],
+    "散熱": ["3017", "3324", "6230", "3653", "2421", "8996"],
+    "CPO/光通訊": ["3081", "3163", "3450", "4908", "4979", "6530"],
+    "重電": ["1503", "1513", "1519", "1605", "1609", "1618"],
+    "航運": ["2603", "2609", "2610", "2618", "2605", "2615"],
+    "金融": ["2880", "2881", "2882", "2883", "2884", "2885", "2886", "2887", "2888", "2890", "2891", "2892"],
 }
 
 
-def _roc_date(d: dt.date) -> str:
-    return d.strftime("%Y%m%d")
+def _dates(back: int = 10):
+    today = dt.date.today()
+    for i in range(back):
+        yield today - dt.timedelta(days=i)
 
 
-def _clean_num(x) -> float:
-    if x is None:
-        return 0.0
-    s = str(x).replace(",", "").replace("--", "0").replace("X", "0").strip()
-    if s in ("", "-", "—"):
-        return 0.0
+def _clean_num(x: Any) -> float:
+    if pd.isna(x):
+        return np.nan
+    s = str(x).replace(",", "").replace("--", "").replace("X", "").strip()
+    if s in ("", "-", "+"):
+        return np.nan
     try:
         return float(s)
     except Exception:
-        return 0.0
+        return np.nan
 
 
-def latest_trading_date(max_back: int = 7) -> dt.date:
-    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
-    for i in range(max_back):
-        d = today - dt.timedelta(days=i)
-        if d.weekday() < 5:
-            return d
-    return today
-
-
-def fetch_twse_prices(date: dt.date) -> pd.DataFrame:
-    params = {"date": _roc_date(date), "type": "ALLBUT0999", "response": "json"}
-    r = requests.get(TWSE_MI_INDEX, params=params, timeout=40)
-    r.raise_for_status()
-    js = r.json()
+def _fetch_twse_price(date: dt.date) -> pd.DataFrame:
+    url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+    params = {"date": date.strftime("%Y%m%d"), "type": "ALLBUT0999", "response": "json"}
+    js = requests.get(url, params=params, timeout=TIMEOUT).json()
     tables = js.get("tables", [])
-    target = None
+    rows = []
     for t in tables:
         fields = t.get("fields", [])
+        data = t.get("data", [])
         if "證券代號" in fields and "收盤價" in fields:
-            target = t
+            rows = data
             break
-    if not target:
+    if not rows:
         return pd.DataFrame()
-    rows = target.get("data", [])
-    fields = target.get("fields", [])
     df = pd.DataFrame(rows, columns=fields)
     out = pd.DataFrame({
         "code": df["證券代號"].astype(str).str.strip(),
@@ -68,113 +60,167 @@ def fetch_twse_prices(date: dt.date) -> pd.DataFrame:
         "close": df["收盤價"].map(_clean_num),
         "volume": df["成交股數"].map(_clean_num) / 1000,
         "turnover_m": df["成交金額"].map(_clean_num) / 1_000_000,
+        "date": date.isoformat(),
+        "market": "上市",
     })
-    out = out[out["code"].str.match(r"^\d{4}$", na=False)]
-    return out
+    return out.dropna(subset=["close"])
 
 
-def fetch_twse_institutional(date: dt.date) -> pd.DataFrame:
-    params = {"date": _roc_date(date), "selectType": "ALL", "response": "json"}
-    r = requests.get(TWSE_T86, params=params, timeout=40)
-    r.raise_for_status()
-    js = r.json()
+def _fetch_twse_inst(date: dt.date) -> pd.DataFrame:
+    url = "https://www.twse.com.tw/rwd/zh/fund/T86"
+    params = {"date": date.strftime("%Y%m%d"), "selectType": "ALL", "response": "json"}
+    js = requests.get(url, params=params, timeout=TIMEOUT).json()
     data = js.get("data", [])
     fields = js.get("fields", [])
     if not data or not fields:
         return pd.DataFrame()
     df = pd.DataFrame(data, columns=fields)
-    def col(name):
+    def col_contains(*ks):
         for c in df.columns:
-            if name in c:
+            if all(k in c for k in ks):
                 return c
         return None
-    code_c = col("證券代號")
-    foreign_c = col("外陸資買賣超股數") or col("外資買賣超股數")
-    invest_c = col("投信買賣超股數")
-    dealer_c = col("自營商買賣超股數")
-    total_c = col("三大法人買賣超股數")
-    out = pd.DataFrame({
-        "code": df[code_c].astype(str).str.strip(),
-        "foreign": df[foreign_c].map(_clean_num) / 1000 if foreign_c else 0,
-        "investment": df[invest_c].map(_clean_num) / 1000 if invest_c else 0,
-        "dealer": df[dealer_c].map(_clean_num) / 1000 if dealer_c else 0,
-        "institutional": df[total_c].map(_clean_num) / 1000 if total_c else 0,
-    })
+    code_col = col_contains("證券代號") or df.columns[0]
+    foreign_col = col_contains("外資", "買賣超")
+    trust_col = col_contains("投信", "買賣超")
+    dealer_col = col_contains("自營商", "買賣超")
+    total_col = col_contains("三大法人", "買賣超")
+    out = pd.DataFrame({"code": df[code_col].astype(str).str.strip()})
+    out["foreign_net"] = df[foreign_col].map(_clean_num) / 1000 if foreign_col else 0
+    out["trust_net"] = df[trust_col].map(_clean_num) / 1000 if trust_col else 0
+    out["dealer_net"] = df[dealer_col].map(_clean_num) / 1000 if dealer_col else 0
+    if total_col:
+        out["total_net"] = df[total_col].map(_clean_num) / 1000
+    else:
+        out["total_net"] = out["foreign_net"] + out["trust_net"] + out["dealer_net"]
     return out
 
 
-def load_market(date: dt.date | None = None) -> tuple[pd.DataFrame, dt.date]:
-    date = date or latest_trading_date()
-    for i in range(7):
-        d = date - dt.timedelta(days=i)
-        if d.weekday() >= 5:
-            continue
+def _fetch_tpex_price(date: dt.date) -> pd.DataFrame:
+    # 櫃買資料格式偶爾調整；失敗時回空表，不影響上市分析
+    url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/otc"
+    params = {"date": date.strftime("%Y/%m/%d"), "type": "EW", "response": "json"}
+    try:
+        js = requests.get(url, params=params, timeout=TIMEOUT).json()
+    except Exception:
+        return pd.DataFrame()
+    data = js.get("tables", [{}])[0].get("data", []) if js.get("tables") else js.get("data", [])
+    fields = js.get("tables", [{}])[0].get("fields", []) if js.get("tables") else js.get("fields", [])
+    if not data or not fields:
+        return pd.DataFrame()
+    df = pd.DataFrame(data, columns=fields[:len(data[0])])
+    def find(k):
+        return next((c for c in df.columns if k in c), None)
+    code_col = find("代號") or df.columns[0]
+    name_col = find("名稱") or df.columns[1]
+    close_col = find("收盤") or find("最後")
+    vol_col = find("成交股數") or find("成交量")
+    amt_col = find("成交金額")
+    if not close_col:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "code": df[code_col].astype(str).str.strip(),
+        "name": df[name_col].astype(str).str.strip(),
+        "close": df[close_col].map(_clean_num),
+        "volume": df[vol_col].map(_clean_num) / 1000 if vol_col else 0,
+        "turnover_m": df[amt_col].map(_clean_num) / 1_000_000 if amt_col else 0,
+        "date": date.isoformat(),
+        "market": "上櫃",
+    })
+    return out.dropna(subset=["close"])
+
+
+def get_market_snapshot() -> pd.DataFrame:
+    last_err = None
+    for d in _dates(12):
         try:
-            price = fetch_twse_prices(d)
-            inst = fetch_twse_institutional(d)
-            if not price.empty and not inst.empty:
-                df = price.merge(inst, on="code", how="left").fillna(0)
-                return df, d
+            price = _fetch_twse_price(d)
+            inst = _fetch_twse_inst(d)
+            if price.empty or inst.empty:
+                continue
+            df = price.merge(inst, on="code", how="left")
+            # TPEx price only as price extension; institutional fallback as zero if not available
+            tpex = _fetch_tpex_price(d)
+            if not tpex.empty:
+                for c in ["foreign_net", "trust_net", "dealer_net", "total_net"]:
+                    tpex[c] = 0.0
+                df = pd.concat([df, tpex], ignore_index=True)
+            for c in ["foreign_net", "trust_net", "dealer_net", "total_net", "volume", "turnover_m"]:
+                df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0)
+            return df
         except Exception as e:
-            print("fetch failed", d, e)
-    raise RuntimeError("無法取得近期 TWSE 資料")
+            last_err = e
+            continue
+    raise RuntimeError(f"無法取得最近交易日資料：{last_err}")
 
 
-def base_filter(df: pd.DataFrame, price_min: float, price_max: float) -> pd.DataFrame:
-    f = df[(df["close"] >= price_min) & (df["close"] <= price_max)].copy()
-    f = f[f["turnover_m"] >= float(os.getenv("MIN_TURNOVER_M", "50"))]
-    f["score"] = (f["institutional"].clip(lower=0) * 0.5 + f["investment"].clip(lower=0) * 0.8 + f["turnover_m"] * 0.02)
-    return f
+def _add_scores(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    d["price_power"] = np.where(d["close"] <= 50, 20, np.where(d["close"] <= 100, 15, np.where(d["close"] <= 300, 10, 5)))
+    d["inst_power"] = np.clip(d["total_net"] / 3000 * 40, 0, 40)
+    d["trust_power"] = np.clip(d["trust_net"] / 1000 * 25, 0, 25)
+    d["volume_power"] = np.clip(d["turnover_m"] / 500 * 15, 0, 15)
+    d["score"] = d["inst_power"] + d["trust_power"] + d["volume_power"] + d["price_power"]
+    d["reason"] = d.apply(lambda r: f"三大法人 {r.total_net:+.0f}張、投信 {r.trust_net:+.0f}張、成交額 {r.turnover_m:.0f}百萬", axis=1)
+    return d
 
 
-def grade(score: float) -> str:
-    if score >= 4000:
-        return "A+ 強勢布局"
-    if score >= 2000:
-        return "A 法人布局"
-    if score >= 1000:
-        return "B+ 觀察"
-    return "B 追蹤"
+def _filter_base(price_min: float, price_max: float) -> pd.DataFrame:
+    df = get_market_snapshot()
+    df = df[(df["close"] >= price_min) & (df["close"] <= price_max)].copy()
+    return _add_scores(df)
 
 
-def rows_from_df(df: pd.DataFrame, mode_name: str, price_min: float, price_max: float, top_n: int = 10) -> list[dict]:
-    rows = []
-    for _, r in df.sort_values("score", ascending=False).head(top_n).iterrows():
-        reason = f"法人合買>1000張、投信買、量能足、{price_min:g}~{price_max:g}元、{mode_name}"
-        rows.append({
-            "code": r["code"], "name": r["name"], "close": f"{r['close']:g}",
-            "turnover_m": f"{r['turnover_m']:.0f}", "institutional": f"{r['institutional']:.0f}",
-            "foreign": f"{r['foreign']:.0f}", "investment": f"{r['investment']:.0f}", "dealer": f"{r['dealer']:.0f}",
-            "grade": grade(float(r["score"])), "reason": reason,
-        })
-    return rows
+def _stock_report(title: str, subtitle: str, rows: pd.DataFrame, top_n: int) -> dict[str, Any]:
+    cols = ["code", "name", "close", "market", "foreign_net", "trust_net", "dealer_net", "total_net", "turnover_m", "score", "reason"]
+    data = rows.sort_values("score", ascending=False).head(top_n)[cols].to_dict("records") if not rows.empty else []
+    return {"kind": "stocks", "title": title, "subtitle": subtitle, "rows": data}
 
 
-def analyze(mode: int = 5, price_min: float = 100, price_max: float = 300, top_n: int = 10):
-    df, date = load_market()
-    f = base_filter(df, price_min, price_max)
+def analyze(mode: int, price_min: float, price_max: float, top_n: int = 10) -> dict[str, Any]:
+    df = _filter_base(price_min, price_max)
+    sub = f"價格 {price_min:g}~{price_max:g} 元｜資料來源：TWSE/TPEx 公開資料"
 
     if mode == 1:
-        x = f[(f["institutional"] > 1000) & (f["investment"] > 0)].copy()
-        x["score"] += (price_max - x["close"]).clip(lower=0) * 3
-        return {"kind": "stocks", "title": "台股盤後法人籌碼掃描", "subtitle": f"大戶佈局尚未起漲｜交易日 {date}｜價格 {price_min:g}~{price_max:g}", "rows": rows_from_df(x, "大戶布局、價格仍在區間低位、尚未爆發候選", price_min, price_max, top_n)}
+        # 大戶佈局尚未起漲：低價位、法人買、成交額有量，但不要過度追高；目前無歷史K，先用低價+法人權重做代理
+        rows = df[(df["total_net"] > 500) & (df["turnover_m"] > 50)].copy()
+        rows["score"] += np.where(rows["close"] <= 50, 10, 0)
+        return _stock_report("🟢 大戶佈局尚未起漲", sub, rows, top_n)
+
     if mode == 2:
         themes = []
         for theme, codes in THEMES.items():
-            sub = f[f["code"].isin(codes)].copy()
-            if sub.empty:
+            g = df[df["code"].isin(codes)].copy()
+            if g.empty:
                 continue
-            today_net = int(sub["institutional"].sum())
-            leader_row = sub.sort_values("institutional", ascending=False).iloc[0]
-            themes.append({"theme": theme, "today_net": today_net, "recent_net": today_net * 5, "leader": f"{leader_row['code']} {leader_row['name']}"})
-        themes.sort(key=lambda x: x["recent_net"], reverse=True)
-        return {"kind": "themes", "title": "最近大戶佈局的題材", "subtitle": f"交易日 {date}｜價格 {price_min:g}~{price_max:g}", "themes": themes[:top_n]}
+            total_net = float(g["total_net"].sum())
+            turnover = float(g["turnover_m"].sum())
+            score = max(0, min(100, total_net / 5000 * 60 + turnover / 1000 * 40))
+            top = g.sort_values("score", ascending=False).head(4)
+            themes.append({
+                "theme": theme,
+                "score": score,
+                "total_net": total_net,
+                "top_names": [f"{r.code} {r.name}" for r in top.itertuples()],
+            })
+        themes = sorted(themes, key=lambda x: x["score"], reverse=True)[:top_n]
+        return {"kind": "themes", "title": "🔥 最近大戶佈局題材", "subtitle": sub, "themes": themes}
+
     if mode == 3:
-        x = f[(f["institutional"] > 1000) & (f["investment"] > 0)].copy()
-        x["score"] += x["turnover_m"] * 0.08 + x["institutional"].clip(lower=0) * 0.2
-        return {"kind": "stocks", "title": "台股盤後法人籌碼掃描", "subtitle": f"大戶佈局即將起漲｜交易日 {date}｜價格 {price_min:g}~{price_max:g}", "rows": rows_from_df(x, "連續買超、量能轉強、即將發動候選", price_min, price_max, top_n)}
+        # 即將起漲：法人、投信、成交金額同時強，分數門檻較高
+        rows = df[(df["total_net"] > 1000) & (df["trust_net"] > 100) & (df["turnover_m"] > 100)].copy()
+        rows["score"] += np.clip(rows["total_net"] / 2000 * 10, 0, 10)
+        return _stock_report("🚀 大戶佈局即將起漲", sub, rows, top_n)
+
     if mode == 4:
-        x = f[f["institutional"] > 1000].copy()
-        return {"kind": "stocks", "title": "台股盤後法人籌碼掃描", "subtitle": f"綜合評分排行榜｜交易日 {date}｜價格 {price_min:g}~{price_max:g}", "rows": rows_from_df(x, "綜合法人、投信、外資、量能與連買評分", price_min, price_max, top_n)}
-    # mode 5 returns multiple reports
-    return {"kind": "multi", "reports": [analyze(1, price_min, price_max, top_n), analyze(2, price_min, price_max, top_n), analyze(3, price_min, price_max, top_n), analyze(4, price_min, price_max, top_n)]}
+        return _stock_report("🏆 綜合評分排行榜", sub, df[df["turnover_m"] > 30], top_n)
+
+    if mode == 5:
+        return {"kind": "multi", "reports": [
+            analyze(1, price_min, price_max, top_n),
+            analyze(2, price_min, price_max, top_n),
+            analyze(3, price_min, price_max, top_n),
+            analyze(4, price_min, price_max, top_n),
+        ]}
+
+    return _stock_report("未知模式", sub, pd.DataFrame(), top_n)

@@ -1,125 +1,168 @@
+from __future__ import annotations
 import os
-import json
 import requests
+from typing import Any
 
-LINE_API = "https://api.line.me/v2/bot/message"
+LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
 
-def _headers():
+def _headers() -> dict[str, str]:
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN is empty")
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
 
-def reply_message(reply_token: str, messages: list[dict]):
-    url = f"{LINE_API}/reply"
-    payload = {"replyToken": reply_token, "messages": messages[:5]}
-    r = requests.post(url, headers=_headers(), data=json.dumps(payload), timeout=30)
-    if not r.ok:
-        print("LINE reply failed", r.status_code, r.text)
-    return r
-
-
-def push_message(to_id: str, messages: list[dict]):
-    url = f"{LINE_API}/push"
-    payload = {"to": to_id, "messages": messages[:5]}
-    r = requests.post(url, headers=_headers(), data=json.dumps(payload), timeout=30)
-    if not r.ok:
-        print("LINE push failed", r.status_code, r.text)
-    return r
-
-
-def text_msg(text: str) -> dict:
+def text_msg(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text[:5000]}
 
 
-def quick_menu_msg() -> dict:
+def reply_message(reply_token: str, messages: list[dict[str, Any]]) -> None:
+    if not reply_token:
+        return
+    payload = {"replyToken": reply_token, "messages": messages[:5]}
+    r = requests.post(LINE_REPLY_URL, headers=_headers(), json=payload, timeout=20)
+    if r.status_code >= 300:
+        print("LINE reply failed", r.status_code, r.text[:500])
+
+
+def push_message(to: str, messages: list[dict[str, Any]]) -> None:
+    if not to:
+        print("LINE push skipped: empty to")
+        return
+    payload = {"to": to, "messages": messages[:5]}
+    r = requests.post(LINE_PUSH_URL, headers=_headers(), json=payload, timeout=20)
+    if r.status_code >= 300:
+        print("LINE push failed", r.status_code, r.text[:500])
+
+
+def quick_reply_text(title: str, items: list[tuple[str, str]]) -> dict[str, Any]:
     return {
         "type": "text",
-        "text": "請選擇分析模式，或先設定價格區間。",
+        "text": title,
         "quickReply": {
             "items": [
-                {"type": "action", "action": {"type": "message", "label": "10~50", "text": "價格 10 50"}},
-                {"type": "action", "action": {"type": "message", "label": "50~100", "text": "價格 50 100"}},
-                {"type": "action", "action": {"type": "message", "label": "100~300", "text": "價格 100 300"}},
-                {"type": "action", "action": {"type": "message", "label": "300~1000", "text": "價格 300 1000"}},
-                {"type": "action", "action": {"type": "message", "label": "尚未起漲", "text": "模式 1"}},
-                {"type": "action", "action": {"type": "message", "label": "題材", "text": "模式 2"}},
-                {"type": "action", "action": {"type": "message", "label": "即將起漲", "text": "模式 3"}},
-                {"type": "action", "action": {"type": "message", "label": "綜合排行", "text": "模式 4"}},
-                {"type": "action", "action": {"type": "message", "label": "全部分析", "text": "模式 5"}},
+                {
+                    "type": "action",
+                    "action": {"type": "message", "label": label[:20], "text": text[:300]},
+                }
+                for label, text in items[:13]
             ]
         },
     }
 
 
-def flex_report(title: str, subtitle: str, rows: list[dict], footer: str = "公開籌碼資料篩選，不是買賣建議。") -> dict:
-    items = []
-    for i, row in enumerate(rows[:10], start=1):
-        code = str(row.get("code", ""))
-        name = str(row.get("name", ""))
-        grade = str(row.get("grade", "A 關注"))
-        close = row.get("close", "-")
-        turnover = row.get("turnover_m", "-")
-        inst = row.get("institutional", row.get("net_buy", "-"))
-        reason = str(row.get("reason", ""))[:90]
-        items.append({
+def main_menu_msg() -> dict[str, Any]:
+    return quick_reply_text(
+        "📊 Sheng-Stock 請選擇分析模式",
+        [
+            ("1 尚未起漲", "模式 1"),
+            ("2 題材布局", "模式 2"),
+            ("3 即將起漲", "模式 3"),
+            ("4 綜合排行", "模式 4"),
+            ("5 全部分析", "模式 5"),
+            ("設定價格", "價格選單"),
+        ],
+    )
+
+
+def price_menu_msg() -> dict[str, Any]:
+    return quick_reply_text(
+        "💰 請選擇股價篩選區間",
+        [
+            ("10~50", "價格 10 50"),
+            ("50~100", "價格 50 100"),
+            ("100~300", "價格 100 300"),
+            ("300~1000", "價格 300 1000"),
+            ("不限", "價格 0 9999"),
+            ("回主選單", "選單"),
+        ],
+    )
+
+
+def status_msg(mode: int, pmin: float, pmax: float) -> dict[str, Any]:
+    return text_msg(f"目前設定\n模式：{mode_name(mode)}\n價格：{pmin:g}~{pmax:g} 元\n\n輸入「選單」可重新選擇。")
+
+
+def mode_name(mode: int) -> str:
+    return {
+        1: "大戶佈局尚未起漲",
+        2: "最近大戶佈局題材",
+        3: "大戶佈局即將起漲",
+        4: "綜合評分排行榜",
+        5: "自動全部分析",
+    }.get(mode, "未知模式")
+
+
+def stars(score: float) -> str:
+    n = max(1, min(5, int(round(score / 20))))
+    return "★" * n + "☆" * (5 - n)
+
+
+def flex_report(title: str, subtitle: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    contents = []
+    for i, r in enumerate(rows[:10], 1):
+        code = str(r.get("code", ""))
+        name = str(r.get("name", ""))
+        close = r.get("close", "-")
+        score = float(r.get("score", 0) or 0)
+        net = r.get("foreign_net", r.get("total_net", 0))
+        reason = str(r.get("reason", ""))[:80]
+        contents.append({
             "type": "box",
             "layout": "vertical",
-            "margin": "md",
-            "paddingAll": "14px",
-            "backgroundColor": "#F8FAFC",
-            "cornerRadius": "14px",
+            "spacing": "xs",
             "contents": [
-                {"type": "box", "layout": "horizontal", "contents": [
-                    {"type": "text", "text": f"{i}. {code} {name}", "weight": "bold", "size": "lg", "color": "#111827", "flex": 3},
-                    {"type": "text", "text": grade, "weight": "bold", "size": "sm", "color": "#10B981", "align": "end", "flex": 2},
-                ]},
-                {"type": "text", "text": f"收盤 {close}｜成交額 {turnover}百萬", "size": "sm", "color": "#4B5563", "wrap": True, "margin": "sm"},
-                {"type": "text", "text": f"法人 {inst}張", "size": "sm", "color": "#4B5563", "wrap": True},
-                {"type": "text", "text": f"理由：{reason}", "size": "sm", "color": "#6B7280", "wrap": True, "margin": "xs"},
+                {"type": "text", "text": f"{i}. {code} {name}  {score:.0f}分", "weight": "bold", "size": "sm", "color": "#111827"},
+                {"type": "text", "text": f"收盤 {close}｜法人/外資 {net:+,.0f}張｜{stars(score)}", "size": "xs", "color": "#374151"},
+                {"type": "text", "text": reason or "符合籌碼篩選條件", "size": "xs", "color": "#6B7280", "wrap": True},
             ],
+            "paddingBottom": "md",
         })
-    if not items:
-        items.append({"type": "text", "text": "本次條件沒有篩到股票。", "wrap": True, "color": "#6B7280"})
-
+    if not contents:
+        contents.append({"type": "text", "text": "本次沒有符合條件的股票。", "wrap": True, "size": "sm"})
     return {
         "type": "flex",
         "altText": title,
         "contents": {
             "type": "bubble",
             "size": "mega",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "backgroundColor": "#111827",
-                "paddingAll": "20px",
-                "contents": [
-                    {"type": "text", "text": title, "weight": "bold", "size": "xl", "color": "#FFFFFF", "wrap": True},
-                    {"type": "text", "text": subtitle, "size": "sm", "color": "#D1D5DB", "wrap": True, "margin": "sm"},
-                ],
-            },
-            "body": {"type": "box", "layout": "vertical", "contents": items},
-            "footer": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": footer, "size": "xs", "color": "#6B7280", "wrap": True}]},
+            "header": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": title, "weight": "bold", "size": "lg", "color": "#FFFFFF"},
+                {"type": "text", "text": subtitle, "size": "xs", "color": "#E5E7EB", "wrap": True},
+            ], "backgroundColor": "#111827", "paddingAll": "16px"},
+            "body": {"type": "box", "layout": "vertical", "contents": contents, "spacing": "sm"},
+            "footer": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": "僅供研究，不構成投資建議。輸入「選單」可再次查詢。", "size": "xxs", "color": "#9CA3AF", "wrap": True}
+            ]},
         },
     }
 
 
-def flex_theme_report(title: str, subtitle: str, themes: list[dict]) -> dict:
+def flex_theme_report(title: str, subtitle: str, themes: list[dict[str, Any]]) -> dict[str, Any]:
     rows = []
-    for i, t in enumerate(themes[:8], 1):
+    for i, t in enumerate(themes[:10], 1):
+        names = "、".join(t.get("top_names", [])[:4])
         rows.append({
-            "type": "box", "layout": "vertical", "margin": "md", "paddingAll": "14px", "backgroundColor": "#F8FAFC", "cornerRadius": "14px",
+            "type": "box", "layout": "vertical", "spacing": "xs", "paddingBottom": "md",
             "contents": [
-                {"type": "text", "text": f"{i}. {t.get('theme')}", "weight": "bold", "size": "lg", "color": "#111827"},
-                {"type": "text", "text": f"近幾日法人 {t.get('recent_net', 0):,}張｜今日 {t.get('today_net', 0):,}張", "size": "sm", "color": "#4B5563", "wrap": True, "margin": "sm"},
-                {"type": "text", "text": f"代表：{t.get('leader', '-')}", "size": "sm", "color": "#6B7280", "wrap": True},
+                {"type": "text", "text": f"{i}. {t.get('theme','')}  {t.get('score',0):.0f}分", "weight": "bold", "size": "sm", "color": "#7C2D12"},
+                {"type": "text", "text": f"法人買超 {t.get('total_net',0):+,.0f}張｜代表：{names}", "size": "xs", "color": "#374151", "wrap": True},
             ]
         })
     if not rows:
-        rows = [{"type":"text","text":"本次條件沒有篩到題材。","wrap":True}]
-    return {"type":"flex","altText":title,"contents":{"type":"bubble","size":"mega","header":{"type":"box","layout":"vertical","backgroundColor":"#7C3AED","paddingAll":"20px","contents":[{"type":"text","text":title,"weight":"bold","size":"xl","color":"#FFFFFF"},{"type":"text","text":subtitle,"size":"sm","color":"#EDE9FE","margin":"sm","wrap":True}]},"body":{"type":"box","layout":"vertical","contents":rows},"footer":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"公開籌碼資料篩選，不是買賣建議。","size":"xs","color":"#6B7280","wrap":True}]}}}
+        rows.append({"type":"text","text":"本次沒有符合條件的題材。","size":"sm"})
+    return {
+        "type": "flex", "altText": title,
+        "contents": {
+            "type":"bubble", "size":"mega",
+            "header":{"type":"box","layout":"vertical","backgroundColor":"#F97316","paddingAll":"16px","contents":[
+                {"type":"text","text":title,"weight":"bold","size":"lg","color":"#FFFFFF"},
+                {"type":"text","text":subtitle,"size":"xs","color":"#FFEDD5","wrap":True},
+            ]},
+            "body":{"type":"box","layout":"vertical","contents":rows,"spacing":"sm"},
+            "footer":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"題材統計依內建族群清單彙總，僅供研究。","size":"xxs","color":"#9CA3AF","wrap":True}]}
+        }
+    }
