@@ -5,3 +5,5 @@ pandas==2.2.2
 numpy==1.26.4
 gunicorn==22.0.0
 APScheduler==3.10.4
+matplotlib==3.9.0
+openpyxl==3.1.5
