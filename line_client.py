@@ -54,9 +54,9 @@ def quick_reply_text(title: str, items: list[tuple[str, str]]) -> dict[str, Any]
     }
 
 
-def main_menu_msg() -> dict[str, Any]:
+def main_menu_msg(user_name: str = "聖豪") -> dict[str, Any]:
     return quick_reply_text(
-        "📊 Sheng-Stock 請選擇分析模式",
+        f"{user_name}，請選擇分析模式 📊",
         [
             ("1 尚未起漲", "模式 1"),
             ("2 題材布局", "模式 2"),
